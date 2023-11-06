@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -16,6 +17,7 @@ type MongoDB struct {
 }
 
 var mongoDB MongoDB
+var rdb *redis.Client
 
 func Init() {
 	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
@@ -26,13 +28,12 @@ func Init() {
 		panic(err)
 	}
 	mongoDB.Client = client
-
-	// defer
 	// defer func() {
 	// 	if err = client.Disconnect(context.TODO()); err != nil {
 	// 		panic(err)
 	// 	}
 	// }()
+
 	//create index
 	coll := client.Database("Go-Real-Estate").Collection("users")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
@@ -56,4 +57,17 @@ func Init() {
 	}
 	fmt.Println("Pinged your deployment. You successfully connected to MongoDB!")
 
+}
+
+func InitRedis() {
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     os.Getenv("REDIS_URI"),
+		Password: "",
+		DB:       0,
+	})
+	_, err := rdb.Ping(context.Background()).Result()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("You are connected to redis succesfully")
 }

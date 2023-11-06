@@ -15,6 +15,7 @@ func main() {
 
 	//Start web server !
 	database.Init()
+	database.InitRedis()
 	//
 
 	StartServer()

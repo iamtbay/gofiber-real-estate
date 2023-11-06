@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/iamtbay/real-estate-api/helpers"
 	"github.com/iamtbay/real-estate-api/models"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -27,8 +29,11 @@ type Estates struct {
 func InitEstates() *Estates {
 	return &Estates{}
 }
+func createRedisKey(idString string) string {
+	return fmt.Sprintf("estate:%v", idString)
+}
 
-var limit int64 = 5
+var limit int64 = 10
 
 // Get All Estates On DB
 func (s *Estates) GetAllEstates(page int) (*Estates, error) {
@@ -161,14 +166,39 @@ func (s *Estates) GetSingleEstate(idString string) (*models.Estate, error) {
 	if err != nil {
 		return nil, err
 	}
-	//db query operations
-	filter := bson.M{"_id": estateID}
 	var estate *models.Estate
-	err = collection.FindOne(ctx, filter).Decode(&estate)
-	if err != nil {
-		if err.Error() == mongo.ErrNoDocuments.Error() {
-			return nil, errors.New("couldn't find. check the id")
+	//redis get
+	redisKey := createRedisKey(idString)
+	result, err := rdb.Get(ctx, redisKey).Result()
+	if err == redis.Nil {
+		//mongodb query operations
+		filter := bson.M{"_id": estateID}
+		err = collection.FindOne(ctx, filter).Decode(&estate)
+		if err != nil {
+			if err.Error() == mongo.ErrNoDocuments.Error() {
+				return nil, errors.New("couldn't find. check the id")
+			}
 		}
+		//redis set
+		err = redisSet(ctx, idString, estate)
+		if err != nil {
+			fmt.Println("redis set err")
+		}
+		// marsalEstate, err := json.Marshal(estate)
+		// if err != nil {
+		// 	fmt.Println("marshal err")
+		// }
+		// err = rdb.Set(ctx, redisKey, []byte(marsalEstate), 12*time.Hour).Err()
+		// if err != nil {
+		// 	fmt.Println("redis set error")
+		// }
+	} else if err != nil {
+		fmt.Println("error else and err", err)
+	}
+
+	err = json.Unmarshal([]byte(result), &estate)
+	if err != nil {
+		return nil, err
 	}
 	return estate, nil
 
@@ -179,27 +209,28 @@ func (s *Estates) AddNewEstate(estateInfo *models.Estate) error {
 	collection := mongoDB.Client.Database("Go-Real-Estate").Collection("estates")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-	//
-	filter := bson.M{
-		"owner_id":      estateInfo.OwnerID,
-		"title":         estateInfo.Title,
-		"estate_type":   estateInfo.EstateType,
-		"estate_status": estateInfo.EstateStatus,
-		"price":         estateInfo.Price,
-		"description":   estateInfo.Description,
-		"year_built:":   estateInfo.YearBuilt,
-		"location":      estateInfo.Location,
-		"floor":         estateInfo.Floor,
-		"rooms":         estateInfo.Rooms,
-		"features":      estateInfo.Features,
-		"images":        estateInfo.Images,
-		"square_mt":     estateInfo.SquareMt,
-		"created_at":    estateInfo.CreatedAt,
-	}
-	_, err := collection.InsertOne(ctx, filter)
+	result, err := collection.InsertOne(ctx, estateInfo)
 	if err != nil {
 		return err
 	}
+	//redis operations
+	objID, ok := result.InsertedID.(primitive.ObjectID)
+	if !ok {
+		fmt.Println("couldn't convert")
+		return nil
+	}
+	estateInfo.ID = objID.Hex()
+	// key := createRedisKey(objID.Hex())
+	// data, err := json.Marshal(estateInfo)
+	// if err != nil {
+	// 	return errors.New("data couldnt marshal")
+	// }
+	//err = rdb.Set(ctx, key, data, 12*time.Hour).Err()
+	err = redisSet(ctx, objID.Hex(), estateInfo)
+	if err != nil {
+		return errors.New("something went wrong")
+	}
+	fmt.Println(objID)
 	return nil
 }
 
@@ -259,6 +290,13 @@ func (s *Estates) UpdateEstate(estateInfo *models.Estate, idString, ownerID stri
 	var updatedEstate *models.Estate
 	_ = collection.FindOneAndUpdate(ctx, filter, update).Decode(&updatedEstate)
 
+	//redis set
+	estateInfo.ID = idString
+	estateInfo.OwnerID = ownerID
+	err = redisSet(ctx, updatedEstate.ID, estateInfo)
+	if err != nil {
+		fmt.Println("redis set error")
+	}
 	return imgShouldDel, nil
 }
 
@@ -284,15 +322,20 @@ func (s *Estates) DeleteEstate(idString, ownerID string) error {
 	if singleRes.Err() != nil {
 		return errors.New("something went wrong! check the id")
 	}
+	//delete redis data
+	key := createRedisKey(idString)
+	err = rdb.Del(ctx, key).Err()
+	if err != nil {
+		fmt.Println("redis delete error")
+	}
 	//delete image paths
-
 	for i := 0; i <= len(images.Images)-1; i++ {
 		imageSplit := strings.Split(images.Images[i], "/")
 		if err := os.Remove(fmt.Sprintf("./public/uploads/%v", imageSplit[len(imageSplit)-1])); err != nil {
-			return err
+			//return err
+			fmt.Println(err)
 		}
 	}
-
 	return nil
 }
 
